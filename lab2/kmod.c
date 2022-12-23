@@ -6,6 +6,7 @@
 #include <linux/namei.h>
 #include <linux/device.h>
 #include <linux/pci.h>
+#include <linux/mutex.h>
 
 #include "kmod_header.h"
 
@@ -18,6 +19,20 @@ static struct proc_dir_entry* proc_entry;
 struct path current_path; 
 struct result* result;
 unsigned int vendor, device;
+
+static DEFINE_MUTEX(kmod_mutex);
+
+static int kmod_open(struct inode* inode, struct file* file) {
+    if (!mutex_trylock(&kmod_mutex)) {
+        return -EBUSY;
+    }
+    return 0;
+}
+
+static int kmod_release(struct inode* inode, struct file* file) {
+    mutex_unlock(&kmod_mutex);
+    return 0;
+}
 
 static ssize_t kmod_args_write (struct file* file, const char __user* ubuf, size_t count, loff_t* offset) {
 	char kbuf[BUF_SIZE];
@@ -50,7 +65,7 @@ int get_structures(void) {
     struct my_dentry* new_md = vmalloc(sizeof(struct my_dentry));
     struct my_pci_dev* new_mpd = vmalloc(sizeof(struct my_pci_dev));
     struct pci_dev* pci = NULL;
-    struct device dev;
+    //struct device dev;
     pr_info("kmod: starts getting information about dentry");
 	if (current_dentry == NULL) {
 		pr_err("kmod: dentry is null");
@@ -66,11 +81,10 @@ int get_structures(void) {
 	vfree(new_md);
     pr_info("kmod: starts getting information about pci_dev");
     pci = pci_get_device(vendor, device, pci);
-    // struct pci_dev* test = NULL;
+    //struct pci_dev* test = NULL;
     // for_each_pci_dev(test) {
-    //     struct device dev_test = test->dev;
     //     pr_info("kmod: pci device %u", test->device);
-    //     pr_info("kmod: device id %u", dev_test.id);
+    //     pr_info("kmod: device id %u", dev_test.id); 
     //     pr_info("kmod: device name %s", dev_test.init_name);
     //     pr_info("kmod: device type: %s", dev_test.type->name);
     //     pr_info("");
@@ -79,7 +93,7 @@ int get_structures(void) {
     new_mpd->device = pci->device;
     new_mpd->class = pci->class;
     strcpy(new_mpd->name, dev_name(&pci->dev));
-    result->mpd = *new_mpd;
+    result->mpd = *new_mpd;         
     vfree(new_mpd);
 	return 0;
 }
@@ -115,7 +129,9 @@ static ssize_t kmod_result_read(struct file* file, char __user* ubuf, size_t cou
 static struct file_operations fops  = {
     .owner = THIS_MODULE,
     .read = kmod_result_read,
-    .write = kmod_args_write
+    .write = kmod_args_write,
+    .open = kmod_open,
+    .release = kmod_release
 };
 
 static int __init kmod_init(void) {
