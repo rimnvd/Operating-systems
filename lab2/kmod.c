@@ -7,7 +7,7 @@
 #include <linux/device.h>
 #include <linux/pci.h>
 
-#define BUF_SIZE 1024
+#include "kmod_header.h"
 
 MODULE_AUTHOR("rimnvd");
 MODULE_DESCRIPTION("os-lab2");
@@ -15,23 +15,23 @@ MODULE_LICENSE("GPL");
 MODULE_VERSION("1.0");
 
 static struct proc_dir_entry* proc_entry;
-struct path current_path;  
-int dev_count;
-static char* dev_buf;
+struct path current_path; 
+struct result* result;
+unsigned int vendor, device;
 
 static ssize_t kmod_args_write (struct file* file, const char __user* ubuf, size_t count, loff_t* offset) {
-    pr_info("kmod: starts write path");
-    char kbuf[BUF_SIZE];
+	char kbuf[BUF_SIZE];
     char path_name[BUF_SIZE];
+    pr_info("kmod: starts writing the args");
     if (*offset > 0 || count > BUF_SIZE) {
         return -EFAULT;
     }
     if (copy_from_user(kbuf, ubuf, count)) {
         return -EFAULT;
     }
-    int  char_write_count =  sscanf(kbuf, "%s", &path_name);
-    if (path_name == NULL) {
-        pr_info("kmod: path is NULL!");
+    sscanf(kbuf, "%s %u %u", path_name, &vendor, &device);
+    if (strlen(path_name) == 0) {
+		pr_err("kmod: path is NULL!");
         return count;
     }
     pr_info("kmod: path: %s", path_name);
@@ -39,57 +39,75 @@ static ssize_t kmod_args_write (struct file* file, const char __user* ubuf, size
         pr_err("kmod: path not found!");
         return count;
     }
+    pr_info("kmod: vendor %u", vendor);
+    pr_info("kmod: device %u", device);
     *offset = strlen(kbuf);
     return strlen(kbuf);
 }
 
-static size_t dentry_struct_write(char __user* ubuf) {
-	pr_info("kmod: starts write dentry");
-    struct dentry* current_dentry = current_path.dentry;
-    struct pci_dev* pci;
-    char kbuf[BUF_SIZE];
-    int len = 0;
-    len += sprintf(kbuf, "\nDENTRY\n");
-    len += sprintf(kbuf + len, "Name : %s\n", current_dentry->d_name.name);
-    len += sprintf(kbuf + len, "Parent name : %s\n", current_dentry->d_parent->d_name.name);
-    len += sprintf(kbuf + len, "Inode UID : %d\n", current_dentry->d_inode->i_uid);
-    len += sprintf(kbuf + len, "Inode GID : %d\n", current_dentry->d_inode->i_gid);
-    if (copy_to_user(ubuf + dev_count,  kbuf, len)) {
-        return -EFAULT;
-    }
-    return len;
-}
-
-static size_t device_struct_write(char __user* ubuf) {
-	pr_info("kmod: starts write device");
-    struct pci_dev* pci;
-	dev_count += sprintf(dev_buf, "DEVICE\n");
-    for_each_pci_dev(pci) {
-        dev_count += sprintf(dev_buf + dev_count, "\n");
-        dev_count += sprintf(dev_buf + dev_count, "Pci: [%d]\n", pci->device);
-        dev_count += sprintf(dev_buf + dev_count, "Id: %d\n", pci->dev.id);
-        dev_count += sprintf(dev_buf + dev_count, "Init name: %s\n", (pci->dev.init_name));
-        dev_count += sprintf(dev_buf + dev_count, "Parent: %s\n", (pci->dev.parent->init_name));
-		dev_count += sprintf(dev_buf + dev_count, "Kobject: %s\n", (pci->dev.kobj.name));
-		dev_count += sprintf(dev_buf + dev_count, "Type: %s\n", (pci->dev.type->name));
-		dev_count += sprintf(dev_buf + dev_count, "Bus: %s\n", (pci->dev.bus->name));
-        if (dev_count > 90000) break;
-    }
-    if (copy_to_user(ubuf, dev_buf, dev_count)) {
-        return -EFAULT;
-    }
-    return dev_count;
+int get_structures(void) {
+	struct dentry* current_dentry = current_path.dentry;
+    struct my_dentry* new_md = vmalloc(sizeof(struct my_dentry));
+    struct my_pci_dev* new_mpd = vmalloc(sizeof(struct my_pci_dev));
+    struct pci_dev* pci = NULL;
+    struct device dev;
+    pr_info("kmod: starts getting information about dentry");
+	if (current_dentry == NULL) {
+		pr_err("kmod: dentry is null");
+		return -1;
+	}
+	result = vmalloc(sizeof(struct result));
+	new_md->d_flags = current_dentry->d_flags;
+	new_md->i_uid = (unsigned int)current_dentry->d_inode->i_uid.val;
+    new_md->i_gid = (unsigned int)current_dentry->d_inode->i_gid.val;
+    strcpy(new_md->name, current_dentry->d_name.name);
+    strcpy(new_md->parent, current_dentry->d_parent->d_name.name);
+	result->md = *new_md;
+	vfree(new_md);
+    pr_info("kmod: starts getting information about pci_dev");
+    pci = pci_get_device(vendor, device, pci);
+    // struct pci_dev* test = NULL;
+    // for_each_pci_dev(test) {
+    //     struct device dev_test = test->dev;
+    //     pr_info("kmod: pci device %u", test->device);
+    //     pr_info("kmod: device id %u", dev_test.id);
+    //     pr_info("kmod: device name %s", dev_test.init_name);
+    //     pr_info("kmod: device type: %s", dev_test.type->name);
+    //     pr_info("");
+    // }
+    new_mpd->vendor = pci->vendor;
+    new_mpd->device = pci->device;
+    new_mpd->class = pci->class;
+    strcpy(new_mpd->name, dev_name(&pci->dev));
+    result->mpd = *new_mpd;
+    vfree(new_mpd);
+	return 0;
 }
 
 static ssize_t kmod_result_read(struct file* file, char __user* ubuf, size_t count, loff_t* offset) {
-	pr_info("kmod: starts read result");
-    char buf[BUF_SIZE];
+	char buf[BUF_SIZE];
     int len = 0;
-    if (*offset > 0) {
+    int status;
+	char* c;
+	int i;
+  pr_info("kmod: starts read the result");
+    if (*offset > 0 || count > BUF_SIZE) {
         return 0;
     }
-	len += device_struct_write(ubuf);
-    len += dentry_struct_write(ubuf);
+   status = get_structures();
+   if (status != 0) {
+	   pr_info("ploha");
+       return -EFAULT;
+   }
+    c = (char*) result;
+    for (i = 0; i < sizeof(struct result); i++) {
+        buf[i] = *c++;
+    }
+    len += i;
+    if (copy_to_user(ubuf, buf, len)) {
+        return -EFAULT;
+    }
+    vfree(result);
     *offset = len;
     return len;
 }
@@ -108,18 +126,12 @@ static int __init kmod_init(void) {
         return -1;
     }
     proc_create("args", 0666, proc_entry, &fops);
-    proc_create("result", 0666, proc_entry, &fops);
-    dev_buf = kmalloc(100000, GFP_KERNEL);
-	if (dev_buf == NULL) {
-		pr_err("kmod: could not allocate memory!");
-		return -1;
-	}
+    proc_create("info", 0666, proc_entry, &fops);
     return 0;
 }
 
 static void __exit kmod_exit(void) {
     proc_remove(proc_entry);
-	kfree(dev_buf);
     pr_info("kmod: module successfully removed");
 }
 
